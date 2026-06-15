@@ -122,3 +122,31 @@ def test_health_ok(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_chat_emits_error_frame_on_failed_turn(monkeypatch):
+    # A failed Hermes turn (result.failed) must surface as error + run.end(error),
+    # not a torn stream. (The brain-raises path is verified live against uvicorn:
+    # run.start → usage → error → run.end; TestClient re-surfaces worker-thread
+    # exceptions, so we assert the deterministic failed-RESULT path here.)
+    class _FailingAgent:
+        def run_conversation(self, user_message, system_message=None, conversation_history=None):
+            return {"failed": True, "error": "model refused", "usage": {"input_tokens": 3, "output_tokens": 0}}
+
+    monkeypatch.setattr(
+        agent_factory,
+        "build_agent",
+        lambda *, model, stream_delta_cb, tool_progress_cb: _FailingAgent(),
+    )
+    monkeypatch.setattr(tool_bridge, "register_advizr_tools", lambda specs, ctx, results: [])
+    monkeypatch.setattr(tool_bridge, "deregister_advizr_tools", lambda slugs: None)
+
+    client = TestClient(server.app)
+    resp = signed_post(client, "/v1/chat", _body())
+    assert resp.status_code == 200
+    events = _parse_events(resp.text)
+    types = [e["type"] for e in events]
+    assert types[0] == "run.start"
+    assert "error" in types
+    assert types[-1] == "run.end"
+    assert events[-1]["finishReason"] == "error"

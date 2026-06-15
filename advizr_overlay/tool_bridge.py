@@ -47,10 +47,21 @@ def register_advizr_tools(
     request_ctx: dict[str, Any],
     results: ResultStore,
 ) -> list[str]:
-    """Register the request's business tools; returns the registered slugs."""
-    registry = _registry()
+    """Register the request's business tools; returns the registered slugs.
+
+    Degrades gracefully: no tools → no registry import; a registry import/API
+    failure logs and returns [] so the turn still runs (just without business
+    tools) instead of tearing the SSE stream.
+    """
+    if not tool_specs:
+        return []
+    try:
+        registry = _registry()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tool_bridge] tool registry unavailable — running without tools: {exc}", flush=True)
+        return []
     registered: list[str] = []
-    for spec in tool_specs or []:
+    for spec in tool_specs:
         slug = spec.get("slug")
         if not slug:
             continue
